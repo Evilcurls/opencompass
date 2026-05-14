@@ -398,6 +398,7 @@ class DefaultSummarizer:
         self._output_to_file(output_path, time_str, table, raw_txts)
 
         if self.lark_reporter:
+            summary_dir = osp.join(self.work_dir, 'summary')
             content = f'{getpass.getuser()} 的'
-            content += f'详细评测汇总已输出至 {osp.abspath(output_path)}'
+            content += f'详细评测汇总已输出至 {osp.abspath(summary_dir)}'
             self.lark_reporter.post(content)

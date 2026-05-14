@@ -4,4 +4,5 @@ from .default import DefaultSummarizer  # noqa: F401
 from .default_subjective import DefaultSubjectiveSummarizer  # noqa: F401
 from .llm_compression import LLMCompressionSummarizer  # noqa: F401
 from .multi_faceted import MultiFacetedSummarizer  # noqa: F401
+from .rich_report import RichReportSummarizer  # noqa: F401
 from .subjective import *  # noqa: F401

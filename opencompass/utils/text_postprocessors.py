@@ -245,6 +245,17 @@ def match_answer_pattern(response_text: str, answer_pattern: str):
     return extracted_answer
 
 
+@TEXT_POSTPROCESSORS.register_module('qwen35_thinking_postprocess')
+def qwen35_thinking_postprocess(text: str) -> str:
+    """Qwen3.5 思考模式后处理器：去掉 </think_> 标签后再提取首字母大写。
+
+    兼容普通模型（无思考标签时直接提取首字母大写）。
+    """
+    if '</think_>' in text:
+        text = text.split('</think_>')[-1]
+    return first_capital_postprocess(text)
+
+
 @TEXT_POSTPROCESSORS.register_module('extract-non-reasoning-content')
 def extract_non_reasoning_content(
     text: str,

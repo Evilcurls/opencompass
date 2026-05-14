@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from threading import Lock
@@ -19,6 +20,109 @@ from opencompass.registry import RUNNERS, TASKS
 from opencompass.utils import get_logger, model_abbr_from_cfg
 
 from .base import BaseRunner
+
+
+class ProgressMonitor(threading.Thread):
+    """Monitor subprocess log file and send Feishu progress updates.
+
+    Parses tqdm-style progress lines from the inference log (e.g.
+    " 50%|█████ | 25/49 [09:57<10:09, 25.41s/it]") and sends notifications
+    at milestone percentages and periodic time intervals.
+    """
+
+    def __init__(self, out_path, lark_reporter, task_name,
+                 check_interval=30, report_time_interval=300):
+        super().__init__(daemon=True)
+        self.out_path = out_path
+        self.lark_reporter = lark_reporter
+        self.task_name = task_name
+        self.check_interval = check_interval
+        self.report_time_interval = report_time_interval
+        self._stop_event = threading.Event()
+        self.reported_milestones = set()
+        self.last_report_time = 0
+        self.start_time = time.time()
+
+    def run(self):
+        # Wait for file to be created
+        while not self._stop_event.is_set() and not os.path.exists(self.out_path):
+            self._stop_event.wait(2)
+        while not self._stop_event.is_set():
+            self._check_progress()
+            self._stop_event.wait(self.check_interval)
+        # Final check after stop
+        self._check_progress()
+
+    def stop(self):
+        self._stop_event.set()
+        self.join(timeout=10)
+
+    def _check_progress(self):
+        if not self.lark_reporter or not os.path.exists(self.out_path):
+            return
+        try:
+            with open(self.out_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except Exception:
+            return
+
+        progress = self._parse_inference_progress(content)
+        if progress is None:
+            return
+
+        current, total, speed = progress
+        if total == 0:
+            return
+        pct = round(current / total * 100, 1)
+
+        now = time.time()
+        elapsed = now - self.start_time
+
+        should_report = False
+
+        # Milestone reporting (25%, 50%, 75%, 100%)
+        milestone = int(pct // 25) * 25
+        if milestone > 0 and milestone not in self.reported_milestones:
+            self.reported_milestones.add(milestone)
+            should_report = True
+
+        # Time-based periodic reporting
+        if (now - self.last_report_time >= self.report_time_interval
+                and 0 < current < total):
+            should_report = True
+
+        if not should_report:
+            return
+
+        self.last_report_time = now
+
+        elapsed_m = int(elapsed // 60)
+        elapsed_s = int(elapsed % 60)
+        eta_str = ''
+        if speed and speed > 0 and current < total:
+            remaining = (total - current) * speed
+            eta_str = f', ETA ~{int(remaining // 60)}m{int(remaining % 60)}s'
+
+        msg = (f'🔄 [{self.task_name}]\n'
+               f'  Progress: {current}/{total} ({pct}%)\n'
+               f'  Speed: {speed:.1f}s/sample\n'
+               f'  Elapsed: {elapsed_m}m{elapsed_s}s{eta_str}')
+        self.lark_reporter.post(msg)
+
+    @staticmethod
+    def _parse_inference_progress(content):
+        """Parse inference tqdm progress from log content.
+
+        Matches lines with 's/it' (seconds per item) which indicates actual
+        model inference, not data loading/mapping (which uses 'it/s').
+        Pattern: " 50%|█████ | 25/49 [09:57<10:09, 25.41s/it]"
+        """
+        pattern = r'(\d+)%\|.*?\|\s*(\d+)/(\d+)\s*\[.*?([\d.]+)s/it\]'
+        matches = list(re.finditer(pattern, content))
+        if not matches:
+            return None
+        last = matches[-1]
+        return int(last.group(2)), int(last.group(3)), float(last.group(4))
 
 
 def get_command_template(gpu_ids: List[int]) -> str:
@@ -231,11 +335,26 @@ class LocalRunner(BaseRunner):
             mmengine.mkdir_or_exist(osp.split(out_path)[0])
             stdout = open(out_path, 'w', encoding='utf-8')
 
+            # Start progress monitor if lark_reporter is available
+            monitor = None
+            if self.lark_reporter:
+                monitor = ProgressMonitor(
+                    out_path=out_path,
+                    lark_reporter=self.lark_reporter,
+                    task_name=task_name,
+                )
+                monitor.start()
+
             result = subprocess.run(cmd,
                                     shell=True,
                                     text=True,
                                     stdout=stdout,
                                     stderr=stdout)
+
+            # Stop progress monitor
+            if monitor:
+                stdout.flush()
+                monitor.stop()
 
             if result.returncode != 0:
                 logger.error(f'task {task_name} fail, see\n{out_path}')

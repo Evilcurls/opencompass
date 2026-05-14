@@ -1,0 +1,1 @@
+lark_bot_url = 'https://open.feishu.cn/open-apis/bot/v2/hook/1c8b31f3-73f1-480f-bf3a-e5095787c748'
